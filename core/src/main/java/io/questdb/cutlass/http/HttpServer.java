@@ -26,6 +26,7 @@ package io.questdb.cutlass.http;
 
 import io.questdb.ServerConfiguration;
 import io.questdb.cairo.CairoEngine;
+import io.questdb.cairo.CairoException;
 import io.questdb.cairo.sql.RecordCursorFactory;
 import io.questdb.cutlass.http.processors.LineHttpPingProcessor;
 import io.questdb.cutlass.http.processors.LineHttpProcessorConfiguration;
@@ -35,6 +36,8 @@ import io.questdb.cutlass.http.processors.TableStatusCheckProcessor;
 import io.questdb.cutlass.http.processors.TextImportProcessor;
 import io.questdb.cutlass.http.processors.TextQueryProcessor;
 import io.questdb.cutlass.http.processors.WarningsProcessor;
+import io.questdb.log.Log;
+import io.questdb.log.LogFactory;
 import io.questdb.mp.Job;
 import io.questdb.mp.WorkerPool;
 import io.questdb.network.HeartBeatException;
@@ -62,6 +65,7 @@ import org.jetbrains.annotations.NotNull;
 import java.io.Closeable;
 
 public class HttpServer implements Closeable {
+    private static final Log LOG = LogFactory.getLog(HttpServer.class);
     static final NoOpAssociativeCache<RecordCursorFactory> NO_OP_CACHE = new NoOpAssociativeCache<>();
     private final ObjList<Closeable> closeables = new ObjList<>();
     private final IODispatcher<HttpConnectionContext> dispatcher;
@@ -349,6 +353,30 @@ public class HttpServer implements Closeable {
             dispatcher.disconnect(context, context.getDisconnectReason());
         } catch (PeerIsSlowToWriteException e) {
             dispatcher.registerChannel(context, IOOperation.READ);
+        } catch (CairoException e) {
+            // Handle OOM and other memory-related exceptions gracefully
+            if (HttpOomErrorHandler.isMemoryException(e)) {
+                LOG.info().$("handling memory exception in HTTP worker [fd=").$(context.getFd()).$(", error=").$safe(e.getFlyweightMessage()).I$();
+            } else {
+                LOG.error().$("unhandled CairoException in HTTP worker [fd=").$(context.getFd()).$(", errno=").$(e.getErrno()).$(", error=").$safe(e.getFlyweightMessage()).I$();
+            }
+            // Try to send error response before disconnecting
+            try {
+                context.simpleResponse().sendStatusTextContent(503);
+            } catch (Throwable sendError) {
+                LOG.debug().$("failed to send error response [fd=").$(context.getFd()).$(", error=").$(sendError).I$();
+            }
+            dispatcher.disconnect(context, IODispatcher.DISCONNECT_REASON_SERVER_ERROR);
+        } catch (Throwable e) {
+            // Handle any other unexpected exceptions
+            LOG.error().$("unexpected exception in HTTP worker [fd=").$(context.getFd()).$(", error=").$(e).I$();
+            // Try to send error response before disconnecting
+            try {
+                context.simpleResponse().sendStatusTextContent(500);
+            } catch (Throwable sendError) {
+                LOG.debug().$("failed to send error response [fd=").$(context.getFd()).$(", error=").$(sendError).I$();
+            }
+            dispatcher.disconnect(context, IODispatcher.DISCONNECT_REASON_SERVER_ERROR);
         }
         return false;
     }

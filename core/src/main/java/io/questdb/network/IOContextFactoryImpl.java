@@ -25,6 +25,10 @@
 package io.questdb.network;
 
 import io.questdb.cairo.CairoException;
+import io.questdb.cutlass.http.HttpConnectionContext;
+import io.questdb.cutlass.http.HttpOomErrorHandler;
+import io.questdb.log.Log;
+import io.questdb.log.LogFactory;
 import io.questdb.mp.EagerThreadSetup;
 import io.questdb.std.Misc;
 import io.questdb.std.ObjectFactory;
@@ -34,6 +38,7 @@ import io.questdb.std.WeakMutableObjectPool;
 import java.io.Closeable;
 
 public class IOContextFactoryImpl<C extends IOContext<C>> implements IOContextFactory<C>, Closeable, EagerThreadSetup {
+    private static final Log LOG = LogFactory.getLog(IOContextFactoryImpl.class);
 
     private final ThreadLocal<WeakMutableObjectPool<C>> contextPool;
     private volatile boolean closed = false;
@@ -68,7 +73,11 @@ public class IOContextFactoryImpl<C extends IOContext<C>> implements IOContextFa
         try {
             return context.of(fd);
         } catch (CairoException e) {
-            if (e.isCritical()) {
+            // Handle OOM and memory-related exceptions
+            if (HttpOomErrorHandler.isMemoryException(e)) {
+                LOG.info().$("OOM exception during context creation [fd=").$(fd).$(", error=").$safe(e.getFlyweightMessage()).I$();
+                context.close();
+            } else if (e.isCritical()) {
                 context.close();
             } else {
                 context.clear();
@@ -76,6 +85,8 @@ public class IOContextFactoryImpl<C extends IOContext<C>> implements IOContextFa
             }
             throw e;
         } catch (Throwable t) {
+            // Handle any other unexpected exceptions during context creation
+            LOG.error().$("unexpected exception during context creation [fd=").$(fd).$(", error=").$(t).I$();
             context.close();
             throw t;
         }

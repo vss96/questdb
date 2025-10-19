@@ -152,8 +152,16 @@ public class HttpConnectionContext extends IOContext<HttpConnectionContext> impl
         this.recvBufferSize = configuration.getRecvBufferSize();
         this.preAllocateBuffers = configuration.preAllocateBuffers();
         if (preAllocateBuffers) {
-            recvBuffer = Unsafe.malloc(recvBufferSize, MemoryTag.NATIVE_HTTP_CONN);
-            this.responseSink.open(configuration.getSendBufferSize());
+            try {
+                recvBuffer = Unsafe.malloc(recvBufferSize, MemoryTag.NATIVE_HTTP_CONN);
+                this.responseSink.open(configuration.getSendBufferSize());
+            } catch (CairoException e) {
+                // Mark as OOM if memory allocation fails
+                if (e.getErrno() != CairoException.NON_CRITICAL) {
+                    throw e.setOutOfMemory(true);
+                }
+                throw e;
+            }
         }
         this.multipartIdleSpinCount = contextConfiguration.getMultipartIdleSpinCount();
         this.dumpNetworkTraffic = contextConfiguration.getDumpNetworkTraffic();
